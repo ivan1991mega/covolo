@@ -304,12 +304,13 @@ app.post("/api/punch/uscita", auth, async (req, res) => {
     const straordinari = Math.max(0, oreTotali - 8);
 
     const dataISO = `${entrata.getFullYear()}-${String(entrata.getMonth()+1).padStart(2,"0")}-${String(entrata.getDate()).padStart(2,"0")}`;
+    const cantiere = !!req.body.cantiere;
 
     const { rows: log } = await pool.query(
-      `INSERT INTO worklogs (user_id, data, inizio, fine, pausa, ore, straordinari)
-       VALUES ($1,$2,$3,$4,$5,$6,$7) RETURNING *`,
+      `INSERT INTO worklogs (user_id, data, inizio, fine, pausa, ore, straordinari, cantiere)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8) RETURNING *`,
       [req.user.id, dataISO, inizioHHMM, fineHHMM, pausaArr,
-       Math.round(oreNormali*100)/100, Math.round(straordinari*100)/100]
+       Math.round(oreNormali*100)/100, Math.round(straordinari*100)/100, cantiere]
     );
     await pool.query("DELETE FROM punch WHERE user_id=$1", [req.user.id]);
     res.json({ worklog: log[0], straordinari: Math.round(straordinari*100)/100 });
@@ -326,23 +327,35 @@ app.delete("/api/punch", auth, async (req, res) => {
 //  ORE LAVORATE (dichiarate dall'utente)
 // ============================================================
 app.get("/api/worklogs", auth, async (req, res) => {
-  const q = req.user.role === "admin"
-    ? await pool.query(`SELECT w.*, u.name AS user_name FROM worklogs w JOIN users u ON u.id=w.user_id ORDER BY w.data DESC`)
-    : await pool.query("SELECT * FROM worklogs WHERE user_id=$1 ORDER BY data DESC", [req.user.id]);
+  if (req.user.role === "admin") {
+    const q = await pool.query(`SELECT w.*, u.name AS user_name FROM worklogs w JOIN users u ON u.id=w.user_id ORDER BY w.data DESC`);
+    return res.json(q.rows);
+  }
+  // Utente: solo mese corrente + 2 mesi precedenti (finestra di 3 mesi).
+  // Calcolo il primo giorno del mese di 2 mesi fa, in riferimento alla data italiana.
+  const oggi = todayItaly(); // YYYY-MM-DD
+  const [y, m] = oggi.split("-").map(Number);
+  let anno = y, mese = m - 2;
+  while (mese < 1) { mese += 12; anno -= 1; }
+  const dataMin = `${anno}-${String(mese).padStart(2,"0")}-01`;
+  const q = await pool.query(
+    "SELECT * FROM worklogs WHERE user_id=$1 AND data >= $2 ORDER BY data DESC",
+    [req.user.id, dataMin]
+  );
   res.json(q.rows);
 });
 
 app.post("/api/worklogs", auth, async (req, res) => {
-  const { data, inizio, fine, pausa, ore, straordinari } = req.body;
+  const { data, inizio, fine, pausa, ore, straordinari, cantiere } = req.body;
   // L'utente può registrare ore solo per la giornata odierna (fuso Italia). L'admin senza vincoli.
   if (req.user.role !== "admin" && !isTodayItaly(data)) {
     return res.status(403).json({ error: "Puoi registrare le ore solo per la giornata di oggi. Le giornate passate può modificarle solo l'amministratore." });
   }
   try {
     const { rows } = await pool.query(
-      `INSERT INTO worklogs (user_id, data, inizio, fine, pausa, ore, straordinari)
-       VALUES ($1,$2,$3,$4,$5,$6,$7) RETURNING *`,
-      [req.user.id, data, inizio, fine, Number(pausa || 0), Number(ore), Number(straordinari || 0)]
+      `INSERT INTO worklogs (user_id, data, inizio, fine, pausa, ore, straordinari, cantiere)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8) RETURNING *`,
+      [req.user.id, data, inizio, fine, Number(pausa || 0), Number(ore), Number(straordinari || 0), !!cantiere]
     );
     res.json(rows[0]);
   } catch (e) {
@@ -354,7 +367,7 @@ app.post("/api/worklogs", auth, async (req, res) => {
 // Modifica di una registrazione ore. L'utente può correggere le proprie;
 // l'admin può correggere quelle di chiunque (in caso di incongruenza).
 app.put("/api/worklogs/:id", auth, async (req, res) => {
-  const { data, inizio, fine, pausa, ore, straordinari } = req.body;
+  const { data, inizio, fine, pausa, ore, straordinari, cantiere } = req.body;
   try {
     const { rows } = await pool.query("SELECT * FROM worklogs WHERE id=$1", [req.params.id]);
     const w = rows[0];
@@ -370,9 +383,9 @@ app.put("/api/worklogs/:id", auth, async (req, res) => {
       return res.status(403).json({ error: "Puoi impostare solo la data di oggi." });
     }
     const { rows: upd } = await pool.query(
-      `UPDATE worklogs SET data=$1, inizio=$2, fine=$3, pausa=$4, ore=$5, straordinari=$6
-       WHERE id=$7 RETURNING *`,
-      [data, inizio, fine, Number(pausa || 0), Number(ore), Number(straordinari || 0), req.params.id]
+      `UPDATE worklogs SET data=$1, inizio=$2, fine=$3, pausa=$4, ore=$5, straordinari=$6, cantiere=$7
+       WHERE id=$8 RETURNING *`,
+      [data, inizio, fine, Number(pausa || 0), Number(ore), Number(straordinari || 0), !!cantiere, req.params.id]
     );
     res.json(upd[0]);
   } catch (e) {
@@ -481,6 +494,7 @@ app.get("/api/export", auth, adminOnly, async (req, res) => {
       { header: "Email", key: "email", width: 30 },
       { header: "Ore lavorate", key: "ore", width: 14 },
       { header: "Straordinari (h)", key: "straord", width: 16 },
+      { header: "Gg in cantiere", key: "cantiere", width: 14 },
       { header: "Permessi (h)", key: "permessi", width: 14 },
       { header: "Ferie (gg)", key: "ferie", width: 12 },
       { header: "Assenze (gg)", key: "assenze", width: 13 },
@@ -493,6 +507,7 @@ app.get("/api/export", auth, adminOnly, async (req, res) => {
       const uLogs = worklogs.filter(w => w.user_id === u.id && inMonth(w.data));
       const ore = uLogs.reduce((s, w) => s + Number(w.ore), 0);
       const straord = uLogs.reduce((s, w) => s + Number(w.straordinari || 0), 0);
+      const giorniCantiere = uLogs.filter(w => w.cantiere).length;
 
       let permessi = 0, ferie = 0, assenze = 0;
       requests.filter(r => r.user_id === u.id).forEach(r => {
@@ -508,6 +523,7 @@ app.get("/api/export", auth, adminOnly, async (req, res) => {
         name: u.name, email: u.email,
         ore: Math.round(ore * 100) / 100,
         straord: Math.round(straord * 100) / 100,
+        cantiere: giorniCantiere,
         permessi: Math.round(permessi * 100) / 100,
         ferie, assenze,
       });
@@ -519,9 +535,10 @@ app.get("/api/export", auth, adminOnly, async (req, res) => {
       name: "TOTALE", email: "",
       ore: { formula: `SUM(C2:C${last-1})` },
       straord: { formula: `SUM(D2:D${last-1})` },
-      permessi: { formula: `SUM(E2:E${last-1})` },
-      ferie: { formula: `SUM(F2:F${last-1})` },
-      assenze: { formula: `SUM(G2:G${last-1})` },
+      cantiere: { formula: `SUM(E2:E${last-1})` },
+      permessi: { formula: `SUM(F2:F${last-1})` },
+      ferie: { formula: `SUM(G2:G${last-1})` },
+      assenze: { formula: `SUM(H2:H${last-1})` },
     });
     totalRow.font = { bold: true };
 
