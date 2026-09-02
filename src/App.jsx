@@ -288,6 +288,7 @@ function PunchClock({ reload }) {
   const [now, setNow] = useState(Date.now());
   const [busy, setBusy] = useState(false);
   const [msg, setMsg] = useState("");
+  const [cantiere, setCantiere] = useState(false);
 
   const load = useCallback(async () => {
     try { setPunch(await api.get("/api/punch")); } catch { setPunch(null); }
@@ -299,18 +300,19 @@ function PunchClock({ reload }) {
     return () => clearInterval(t);
   }, []);
 
-  const act = async (path, okMsg) => {
+  const act = async (path) => {
     setBusy(true); setMsg("");
     try {
-      const res = await api.post(`/api/punch/${path}`);
+      const body = path === "uscita" ? { cantiere } : undefined;
+      const res = await api.post(`/api/punch/${path}`, body);
       if (path === "uscita") {
         setMsg(res.straordinari > 0
           ? `Uscita registrata. Attenzione: ${res.straordinari}h di STRAORDINARIO.`
           : "Uscita registrata.");
+        setCantiere(false);
         await reload();
       }
       await load();
-      if (okMsg) setMsg(okMsg);
     } catch (e) { setMsg(e.message); }
     finally { setBusy(false); }
   };
@@ -350,6 +352,10 @@ function PunchClock({ reload }) {
         <>
           <div className={straordFlag ? "punchtimer straord" : "punchtimer"}>{elapsed}</div>
           {straordFlag && <div className="straordbanner">Oltre le 8 ore: sei in STRAORDINARIO</div>}
+          <label className="checkfield punchcheck">
+            <input type="checkbox" checked={cantiere} onChange={e=>setCantiere(e.target.checked)} />
+            <span>In cantiere <span className="muted small">(spunta prima di uscire)</span></span>
+          </label>
           <div className="punchbtns">
             {punch.stato === "attivo"
               ? <button className="btn" onClick={()=>act("pausa")} disabled={busy}>⏸ Pausa</button>
@@ -370,12 +376,12 @@ function PunchClock({ reload }) {
 
 function UserWorklogs({ logs, detected, reload }) {
   const oggi = todayISO();
-  const empty = { id:null, data:oggi, inizio:"09:00", fine:"18:00", pausa:"60", straordinari:"0" };
+  const empty = { id:null, data:oggi, inizio:"09:00", fine:"18:00", pausa:"60", straordinari:"0", cantiere:false };
   const [f, setF] = useState(empty);
   const [err, setErr] = useState("");
 
   const editing = f.id !== null;
-  const startEdit = (l) => { setErr(""); setF({ id:l.id, data:iso(l.data), inizio:l.inizio, fine:l.fine, pausa:String(l.pausa), straordinari:String(l.straordinari||0) }); };
+  const startEdit = (l) => { setErr(""); setF({ id:l.id, data:iso(l.data), inizio:l.inizio, fine:l.fine, pausa:String(l.pausa), straordinari:String(l.straordinari||0), cantiere:!!l.cantiere }); };
   const cancel = () => { setErr(""); setF(empty); };
 
   const save = async () => {
@@ -389,7 +395,7 @@ function UserWorklogs({ logs, detected, reload }) {
     const straordAuto = Math.max(0, oreLorde - 8);
     const straord = straordManuale > 0 ? straordManuale : round2(straordAuto);
     const oreDaSalvare = straordManuale > 0 ? round2(oreLorde - straordManuale) : round2(oreNormali);
-    const payload = { data:oggi, inizio:f.inizio, fine:f.fine, pausa:parseInt(f.pausa||"0",10), ore:oreDaSalvare, straordinari:straord };
+    const payload = { data:oggi, inizio:f.inizio, fine:f.fine, pausa:parseInt(f.pausa||"0",10), ore:oreDaSalvare, straordinari:straord, cantiere:f.cantiere };
     try {
       if (editing) await api.put(`/api/worklogs/${f.id}`, payload);
       else await api.post("/api/worklogs", payload);
@@ -410,6 +416,10 @@ function UserWorklogs({ logs, detected, reload }) {
           <label className="field"><span>Pausa (min)</span><input type="number" min="0" step="15" value={f.pausa} onChange={e=>setF({...f,pausa:e.target.value})} /></label>
           <label className="field"><span>Straordinari (h)</span><input type="number" min="0" step="0.25" value={f.straordinari} onChange={e=>setF({...f,straordinari:e.target.value})} placeholder="auto se >8h" /></label>
         </div>
+        <label className="checkfield">
+          <input type="checkbox" checked={f.cantiere} onChange={e=>setF({...f,cantiere:e.target.checked})} />
+          <span>In cantiere <span className="muted small">(se non spuntato: in sede)</span></span>
+        </label>
         {err && <div className="alert">{err}</div>}
         <div className="rowend">
           {editing && <button className="btn ghost" onClick={cancel}>Annulla</button>}
@@ -426,7 +436,7 @@ function UserWorklogs({ logs, detected, reload }) {
           return (
             <div key={l.id} className="logrow">
               <div className="logdate">{fmtDate(l.data)}</div>
-              <div className="logtimes">{l.inizio}–{l.fine} · pausa {l.pausa}′</div>
+              <div className="logtimes">{l.inizio}–{l.fine} · pausa {l.pausa}′ {l.cantiere ? <span className="sitetag cantiere">In cantiere</span> : <span className="sitetag sede">In sede</span>}</div>
               <div className="loghours">{round2(Number(l.ore))}h {straord>0 && <span className="straordtag">+{straord}h str.</span>}</div>
               <div className="logcompare">{det ? <span className={diff===0?"cmp ok":"cmp warn"}>Rilevate {round2(Number(det.ore))}h {diff!==0&&`(Δ ${diff>0?"+":""}${diff}h)`}</span> : <span className="muted small">nessun rilevamento</span>}</div>
               <div className="logactions">
@@ -441,7 +451,7 @@ function UserWorklogs({ logs, detected, reload }) {
           );
         })}
       </div>
-      <p className="muted small">Puoi inserire e modificare le ore solo per la giornata di oggi. Dalla mezzanotte le ore del giorno si bloccano: dopo di che solo l'amministratore può modificarle.</p>
+      <p className="muted small">Puoi inserire e modificare le ore solo per la giornata di oggi. Dalla mezzanotte le ore del giorno si bloccano: dopo di che solo l'amministratore può modificarle. In questo archivio vedi il mese corrente e i due precedenti.</p>
     </div>
   );
 }
@@ -713,13 +723,13 @@ function AdminUserWorklogs({ user, logs, detected, reload }) {
   const [f, setF] = useState(null); // registrazione in modifica
   const [err, setErr] = useState("");
 
-  const startEdit = (l) => { setErr(""); setF({ id:l.id, data:iso(l.data), inizio:l.inizio, fine:l.fine, pausa:String(l.pausa), ore:String(round2(Number(l.ore))), straordinari:String(round2(Number(l.straordinari||0))) }); };
+  const startEdit = (l) => { setErr(""); setF({ id:l.id, data:iso(l.data), inizio:l.inizio, fine:l.fine, pausa:String(l.pausa), ore:String(round2(Number(l.ore))), straordinari:String(round2(Number(l.straordinari||0))), cantiere:!!l.cantiere }); };
   const cancel = () => { setErr(""); setF(null); };
 
   const save = async () => {
     setErr("");
     if (f.fine<=f.inizio) return setErr("L'orario di fine deve essere dopo l'inizio.");
-    const payload = { data:f.data, inizio:f.inizio, fine:f.fine, pausa:parseInt(f.pausa||"0",10), ore:round2(parseFloat(f.ore||"0")), straordinari:round2(parseFloat(f.straordinari||"0")) };
+    const payload = { data:f.data, inizio:f.inizio, fine:f.fine, pausa:parseInt(f.pausa||"0",10), ore:round2(parseFloat(f.ore||"0")), straordinari:round2(parseFloat(f.straordinari||"0")), cantiere:f.cantiere };
     try { await api.put(`/api/worklogs/${f.id}`, payload); cancel(); reload(); }
     catch(e){ setErr(e.message); }
   };
@@ -744,6 +754,10 @@ function AdminUserWorklogs({ user, logs, detected, reload }) {
             <label className="field"><span>Ore</span><input type="number" min="0" step="0.25" value={f.ore} onChange={e=>setF({...f,ore:e.target.value})} /></label>
             <label className="field"><span>Straordinari (h)</span><input type="number" min="0" step="0.25" value={f.straordinari} onChange={e=>setF({...f,straordinari:e.target.value})} /></label>
           </div>
+          <label className="checkfield">
+            <input type="checkbox" checked={f.cantiere} onChange={e=>setF({...f,cantiere:e.target.checked})} />
+            <span>In cantiere</span>
+          </label>
           {err && <div className="alert">{err}</div>}
           <div className="rowend"><button className="btn ghost" onClick={cancel}>Annulla</button><button className="btn primary" onClick={save}>Salva modifiche</button></div>
         </div>
@@ -757,7 +771,7 @@ function AdminUserWorklogs({ user, logs, detected, reload }) {
           return (
             <div key={l.id} className="logrow">
               <div className="logdate">{fmtDate(l.data)}</div>
-              <div className="logtimes">{l.inizio}–{l.fine} · pausa {l.pausa}′</div>
+              <div className="logtimes">{l.inizio}–{l.fine} · pausa {l.pausa}′ {l.cantiere ? <span className="sitetag cantiere">In cantiere</span> : <span className="sitetag sede">In sede</span>}</div>
               <div className="loghours">{round2(Number(l.ore))}h {straord>0 && <span className="straordtag">+{straord}h str.</span>}</div>
               <div className="logcompare">{det ? <span className={diff===0?"cmp ok":"cmp warn"}>Rilevate {round2(Number(det.ore))}h {diff!==0&&`(Δ ${diff>0?"+":""}${diff}h)`}</span> : <span className="muted small">nessun rilevamento</span>}</div>
               <div className="logactions">
@@ -1260,6 +1274,13 @@ h3{ font-size:16px; margin:0 0 10px; }
   .punchtimer{ font-size:34px; }
 }
 .straordtag{ font-size:11px; font-weight:700; color:#b3701c; background:#f7ecd9; padding:2px 7px; border-radius:20px; margin-left:6px; }
+.checkfield{ display:flex; align-items:center; gap:8px; font-size:14px; font-weight:600; color:var(--ink); margin:4px 0 12px; cursor:pointer; }
+.checkfield input[type=checkbox]{ width:18px; height:18px; accent-color:var(--accent); cursor:pointer; }
+.punchcheck{ justify-content:center; margin:12px 0; }
+.sitetag{ font-size:10.5px; font-weight:700; padding:2px 7px; border-radius:20px; margin-left:4px; }
+.sitetag.cantiere{ background:#e0ebf4; color:#2b5f8a; }
+.sitetag.sede{ background:var(--panel2); color:var(--muted); }
+:root[data-theme="dark"] .sitetag.cantiere{ background:#22323f; color:#a9cee8; }
 .editbanner{ background:#e0ebf4; color:#2b5f8a; padding:8px 12px; border-radius:9px; font-size:13px; font-weight:600; margin-bottom:12px; }
 .editcard{ border-color:var(--accent); }
 .usergroup{ background:var(--panel); border:1px solid var(--line); border-radius:12px; overflow:hidden; }
